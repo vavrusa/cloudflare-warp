@@ -20,6 +20,7 @@ import (
 	"github.com/cloudflare/cloudflare-warp/metrics"
 	"github.com/cloudflare/cloudflare-warp/origin"
 	"github.com/cloudflare/cloudflare-warp/tlsconfig"
+	"github.com/cloudflare/cloudflare-warp/tunneldns"
 	tunnelpogs "github.com/cloudflare/cloudflare-warp/tunnelrpc/pogs"
 	"github.com/cloudflare/cloudflare-warp/validation"
 
@@ -267,6 +268,29 @@ WARNING:
 			Usage: "HTTP proxy timeout for closing an idle connection",
 			Value: time.Second * 90,
 		}),
+		altsrc.NewBoolFlag(&cli.BoolFlag{
+			Name:    "proxy-dns",
+			Usage:   "Run a DNS over HTTPS proxy server.",
+			EnvVars: []string{"TUNNEL_DNS"},
+		}),
+		altsrc.NewIntFlag(&cli.IntFlag{
+			Name:    "proxy-dns-port",
+			Value:   53,
+			Usage:   "Listen on given port for the DNS over HTTPS proxy server.",
+			EnvVars: []string{"TUNNEL_DNS_PORT"},
+		}),
+		altsrc.NewStringFlag(&cli.StringFlag{
+			Name:    "proxy-dns-address",
+			Usage:   "Listen address for the DNS over HTTPS proxy server.",
+			Value:   "localhost",
+			EnvVars: []string{"TUNNEL_DNS_ADDRESS"},
+		}),
+		altsrc.NewStringSliceFlag(&cli.StringSliceFlag{
+			Name:    "proxy-dns-upstream",
+			Usage:   "Upstream endpoint URL, you can specify multiple endpoints for redundancy.",
+			Value:   cli.NewStringSlice("https://dns.cloudflare.com/.well-known/dns-query"),
+			EnvVars: []string{"TUNNEL_DNS_UPSTREAM"},
+		}),
 	}
 	app.Action = func(c *cli.Context) error {
 		raven.CapturePanic(func() { startServer(c) }, nil)
@@ -321,6 +345,38 @@ WARNING:
 					Name:  "port",
 					Usage: "Listen on the selected port.",
 					Value: 8080,
+				},
+			},
+			ArgsUsage: " ", // can't be the empty string or we get the default output
+		},
+		{
+			Name:   "proxy-dns",
+			Action: tunneldns.Run,
+			Usage:  "Run a DNS over HTTPS proxy server.",
+			Flags: []cli.Flag{
+				&cli.StringFlag{
+					Name:    "metrics",
+					Value:   "localhost:",
+					Usage:   "Listen address for metrics reporting.",
+					EnvVars: []string{"TUNNEL_METRICS"},
+				},
+				&cli.StringFlag{
+					Name:    "address",
+					Usage:   "Listen address for the DNS over HTTPS proxy server.",
+					Value:   "localhost",
+					EnvVars: []string{"TUNNEL_DNS_ADDRESS"},
+				},
+				&cli.IntFlag{
+					Name:    "port",
+					Usage:   "Listen on given port for the DNS over HTTPS proxy server.",
+					Value:   53,
+					EnvVars: []string{"TUNNEL_DNS_PORT"},
+				},
+				&cli.StringSliceFlag{
+					Name:    "upstream",
+					Usage:   "Upstream endpoint URL, you can specify multiple endpoints for redundancy.",
+					Value:   cli.NewStringSlice("https://dns.cloudflare.com/.well-known/dns-query"),
+					EnvVars: []string{"TUNNEL_DNS_UPSTREAM"},
 				},
 			},
 			ArgsUsage: " ", // can't be the empty string or we get the default output
@@ -397,6 +453,21 @@ func startServer(c *cli.Context) {
 			listener.Close()
 		}()
 		c.Set("url", "https://"+listener.Addr().String())
+	}
+
+	if c.IsSet("proxy-dns") {
+		wg.Add(1)
+		listener, err := tunneldns.CreateListener(c.String("proxy-dns-address"), uint16(c.Uint("proxy-dns-port")), c.StringSlice("proxy-dns-upstream"))
+		if err != nil {
+			listener.Stop()
+			Log.WithError(err).Fatal("Cannot start the DNS over HTTPS proxy server")
+		}
+		go func() {
+			listener.Start()
+			<-shutdownC
+			listener.Stop()
+			wg.Done()
+		}()
 	}
 
 	url, err := validateUrl(c)
